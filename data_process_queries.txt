@@ -1,0 +1,914 @@
+create table cap_rate_clear as
+select * from capitaliq_ratings_backup where
+orgdtype = 'Issuer Credit Rating' and
+rtype = 'Std. S&P  (Long-term)' and 
+gvkey is not null
+group by gvkey, rate_date, rating;
+
+create table cap_rate_clear_last_yr as
+select 
+gvkey,
+tic,
+cusip,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear
+from (
+select *,
+@predate :=if(@pregvkey = gvkey, @olddate, NULL) as pre_date,
+@prerating :=if(@pregvkey = gvkey, @oldrating, NULL) as pre_rating,
+@olddate:=rate_date,
+@oldrating:=rating,
+@pregvkey:=gvkey
+from cap_rate_clear, 
+(select @pregvkey:=NULL) pg, 
+(select @predate:=NULL) pd, 
+(select @prerating:=NULL) pr, 
+(select @olddate:=NULL) od, 
+(select @oldrating:=NULL) ora
+order by gvkey, rate_date ) a;
+
+create table cap_rate_clear_last_yr_backup as
+select * from cap_rate_clear_last_yr;
+
+create table cap_rate_clear_last_yr_5 as
+select *, (ryear+1) as ryear_p1, 
+(ryear-1) as ryear_m1, 
+(ryear+2) as ryear_p2, 
+(ryear-2) as ryear_m2
+from cap_rate_clear_last_yr;
+
+create table bank_yr_5 as
+select *, (yearfiled+1) as yearf_p1, 
+(yearfiled-1) as yearf_m1, 
+(yearfiled+2) as yearf_p2, 
+(yearfiled-2) as yearf_m2
+from bankruptcy_backup;
+
+create table linksys_clear as
+select * from linksys_backup where lpermno0 is not null;
+
+create table duplicate_link as
+select lpermno0, gvkey0, conm0, tic0, fyear0 from linksys_clear 
+where lpermno0 in (
+select lpermno0 from (
+select lpermno0, count(distinct gvkey0) as per from linksys_clear group by lpermno0) a
+where per>1) group by gvkey0 order by lpermno0;
+
+create table linksys_clear_nodup as
+select * from linksys_clear where lpermno0 not in
+(select distinct lpermno0 from duplicate_link);
+
+create table linksys_clear_nodup_couple as
+select gvkey0, lpermno0 from linksys_clear_nodup group by gvkey0, lpermno0;
+
+create table linksys_clear_nodup_couples as
+select * from linksys_clear_nodup group by gvkey0;
+
+create table compustat_clink as
+select cpermno, dates, spermno, gvkey0 as cgvkey from
+compustat_backup left join linksys_clear_nodup_couple on
+compustat_backup.cpermno = linksys_clear_nodup_couple.lpermno0;
+
+create table compustat_cslink as
+select cpermno, dates, spermno, cgvkey, gvkey0 as sgvkey from
+compustat_clink left join linksys_clear_nodup_couple on
+compustat_clink.spermno = linksys_clear_nodup_couple.lpermno0;
+
+create table cap_rate_clear_last_yr_5_full as
+select
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+gvkey,
+tic,
+cusip,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2
+ from cap_rate_clear_last_yr_5 left join linksys_clear_nodup_couples on
+cap_rate_clear_last_yr_5.gvkey = linksys_clear_nodup_couples.gvkey0;
+
+create table bank_yr_5_full as
+select
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0
+from bank_yr_5 left join linksys_clear_nodup_couples on
+bank_yr_5.gvkeybefore = linksys_clear_nodup_couples.gvkey0;
+
+create table compustat_cslink_interval as
+select cgvkey, sgvkey, max(dates) as end, min(dates) as start, (max(dates)-min(dates)) as duration from compustat_cslink
+where cgvkey is not null and sgvkey is not null
+group by cgvkey, sgvkey;
+
+
+select
+cgvkey, sgvkey, end, start, duration
+from
+compustat_cslink_interval
+where
+duration = (select max(duration) from compustat_cslink_interval i where i.cgvkey = compustat_cslink_interval.cgvkey) limit 100;
+
+create table bank_yr_full as 
+select 
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+GvkeyEmerging,
+YearFiled
+from bank_yr_5_full;
+--------------------------------------------------------------------------------------------------------------------------------
+create table bank_yr_full_cinterval as
+select 
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+GvkeyEmerging,
+YearFiled,
+if(cgvkey is null,0,1) as customer,
+cgvkey,
+end as end_customer,
+start as start_customer,
+duration
+from bank_yr_full left join compustat_cslink_interval on
+bank_yr_full.gvkeybefore = compustat_cslink_interval.cgvkey and
+yearfiled <= end and yearfiled>=start;
+
+create table bank_yr_full_cinterval_max as
+select
+*
+from
+bank_yr_full_cinterval
+where
+duration = (select max(duration) from bank_yr_full_cinterval i where i.gvkeybefore = bank_yr_full_cinterval.gvkeybefore) or duration is null group by NameCorp, DateFiled;		
+
+create table bank_yr_full_sinterval as
+select 
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+GvkeyEmerging,
+YearFiled,
+if(sgvkey is null,0,1) as supplier,
+sgvkey,
+end as end_supplier,
+start as start_supplier,
+duration
+from bank_yr_full left join compustat_cslink_interval on
+bank_yr_full.gvkeybefore = compustat_cslink_interval.sgvkey and
+yearfiled <= end and yearfiled>=start;
+
+
+create table bank_yr_full_sinterval_max as
+select
+*
+from
+bank_yr_full_sinterval
+where
+duration = (select max(duration) from bank_yr_full_sinterval i where i.gvkeybefore = bank_yr_full_sinterval.gvkeybefore) or duration is null group by NameCorp, DateFiled;
+
+create table bank_yr_full_csinerval_max as
+select * from 
+bank_yr_full_sinterval_max left join (
+select customer, end_customer, start_customer, NameCorp as NC, GvkeyBefore as GB, datefiled as df  from bank_yr_full_cinterval_max
+) ic on 
+bank_yr_full_sinterval_max.NameCorp = ic.NC and 
+bank_yr_full_sinterval_max.GvkeyBefore = ic.GB and 
+bank_yr_full_sinterval_max.datefiled = ic.df;
+---------------------------------------------------------------------------------------
+create table cap_rate_clear_last_yr_full as
+select 
+conm0,
+gvkey,
+GVKEY0,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear
+from cap_rate_clear_last_yr_5_full;
+
+create table cap_rate_clear_last_yr_full_cinterval as
+select 
+conm0,
+gvkey,
+GVKEY0,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+if(cgvkey is null,0,1) as customer,
+cgvkey,
+end as end_customer,
+start as start_customer,
+duration
+from cap_rate_clear_last_yr_full left join compustat_cslink_interval on
+cap_rate_clear_last_yr_full.gvkey = compustat_cslink_interval.cgvkey and
+ryear <= end and ryear>=start;
+
+create table cap_rate_clear_last_yr_full_cinterval_max as
+select
+*
+from
+cap_rate_clear_last_yr_full_cinterval
+where
+duration = (select max(duration) from cap_rate_clear_last_yr_full_cinterval i where i.gvkey = cap_rate_clear_last_yr_full_cinterval.gvkey) or duration is null group by gvkey, conm0, rate_date;
+
+create table cap_rate_clear_last_yr_full_sinterval as
+select 
+conm0,
+gvkey,
+GVKEY0,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+if(sgvkey is null,0,1) as supplier,
+sgvkey,
+end as end_supplier,
+start as start_supplier,
+duration
+from cap_rate_clear_last_yr_full left join compustat_cslink_interval on
+cap_rate_clear_last_yr_full.gvkey = compustat_cslink_interval.sgvkey and
+ryear <= end and ryear>=start;
+
+create table cap_rate_clear_last_yr_full_sinterval_max as
+select
+*
+from
+cap_rate_clear_last_yr_full_sinterval
+where
+duration = (select max(duration) from cap_rate_clear_last_yr_full_sinterval i where i.gvkey = cap_rate_clear_last_yr_full_sinterval.gvkey) or duration is null group by gvkey, conm0, rate_date;
+
+create table cap_rate_clear_last_yr_full_csinterval_max as
+select * from 
+cap_rate_clear_last_yr_full_sinterval_max left join (
+select end_customer, start_customer, conm0 as NC, gvkey as GB, rate_date as df  from cap_rate_clear_last_yr_full_cinterval_max
+) ic on 
+cap_rate_clear_last_yr_full_sinterval_max.conm0 = ic.NC and 
+cap_rate_clear_last_yr_full_sinterval_max.gvkey = ic.GB and 
+cap_rate_clear_last_yr_full_sinterval_max.rate_date = ic.df;
+--------------------------------------------------------------------------------------
+create table bank_yr_5_full_i as 
+select
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer, 
+if(sgvkey is null,0,1) as supplier
+from
+(select 
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+if(cgvkey is null,0,1) as customer 
+from
+bank_yr_5_full left join compustat_cslink on
+bank_yr_5_full.gvkeybefore = compustat_cslink.cgvkey and
+bank_yr_5_full.yearfiled = compustat_cslink.dates
+group by gvkeybefore, datefiled) ic left join compustat_cslink on
+ic.gvkeybefore = compustat_cslink.sgvkey and
+ic.yearfiled = compustat_cslink.dates
+group by gvkeybefore, datefiled;
+
+create table bank_yr_5_full_p1 as 
+select
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer,
+supplier,
+customer_p1, 
+if(sgvkey is null,0,1) as supplier_p1
+from
+(select 
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer,
+supplier,
+if(cgvkey is null,0,1) as customer_p1
+from
+bank_yr_5_full_i left join compustat_cslink on
+bank_yr_5_full_i.gvkeybefore = compustat_cslink.cgvkey and
+bank_yr_5_full_i.yearf_p1 = compustat_cslink.dates
+group by gvkeybefore, datefiled) ic left join compustat_cslink on
+ic.gvkeybefore = compustat_cslink.sgvkey and
+ic.yearf_p1 = compustat_cslink.dates
+group by gvkeybefore, datefiled;
+
+create table bank_yr_5_full_p2 as 
+select
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer,
+supplier,
+customer_p1,
+supplier_p1,
+customer_p2, 
+if(sgvkey is null,0,1) as supplier_p2
+from
+(select 
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer,
+supplier,
+customer_p1,
+supplier_p1,
+if(cgvkey is null,0,1) as customer_p2
+from
+bank_yr_5_full_p1 left join compustat_cslink on
+bank_yr_5_full_p1.gvkeybefore = compustat_cslink.cgvkey and
+bank_yr_5_full_p1.yearf_p2 = compustat_cslink.dates
+group by gvkeybefore, datefiled) ic left join compustat_cslink on
+ic.gvkeybefore = compustat_cslink.sgvkey and
+ic.yearf_p2 = compustat_cslink.dates
+group by gvkeybefore, datefiled;
+
+create table bank_yr_5_full_m2 as 
+select
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer,
+supplier,
+customer_p1,
+supplier_p1,
+customer_p2,
+supplier_p2,
+customer_m2, 
+if(sgvkey is null,0,1) as supplier_m2
+from
+(select 
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer,
+supplier,
+customer_p1,
+supplier_p1,
+customer_p2,
+supplier_p2,
+if(cgvkey is null,0,1) as customer_m2
+from
+bank_yr_5_full_p2 left join compustat_cslink on
+bank_yr_5_full_p2.gvkeybefore = compustat_cslink.cgvkey and
+bank_yr_5_full_p2.yearf_m2 = compustat_cslink.dates
+group by gvkeybefore, datefiled) ic left join compustat_cslink on
+ic.gvkeybefore = compustat_cslink.sgvkey and
+ic.yearf_m2 = compustat_cslink.dates
+group by gvkeybefore, datefiled;
+
+
+create table bank_yr_5_full_m1 as 
+select
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer,
+supplier,
+customer_p1,
+supplier_p1,
+customer_p2,
+supplier_p2,
+customer_m2,
+supplier_m2,
+customer_m1, 
+if(sgvkey is null,0,1) as supplier_m1
+from
+(select 
+NameCorp,
+AfterEmerging,
+DateFiled,
+GvkeyBefore,
+GvkeyEmerging,
+YearFiled,
+yearf_p1,
+yearf_m1,
+yearf_p2,
+yearf_m2,
+GVKEY0,
+tic0,
+cusip0,
+conm0,
+cik0,
+customer,
+supplier,
+customer_p1,
+supplier_p1,
+customer_p2,
+supplier_p2,
+customer_m2,
+supplier_m2,
+if(cgvkey is null,0,1) as customer_m1
+from
+bank_yr_5_full_m2 left join compustat_cslink on
+bank_yr_5_full_m2.gvkeybefore = compustat_cslink.cgvkey and
+bank_yr_5_full_m2.yearf_m1 = compustat_cslink.dates
+group by gvkeybefore, datefiled) ic left join compustat_cslink on
+ic.gvkeybefore = compustat_cslink.sgvkey and
+ic.yearf_m1 = compustat_cslink.dates
+group by gvkeybefore, datefiled;
+--------------------------------------------------------------------------------------
+create table cap_rate_clear_last_yr_5_full_i as 
+select
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+if(sgvkey is null,0,1) as supplier
+from
+(select 
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+if(cgvkey is null,0,1) as customer 
+from
+cap_rate_clear_last_yr_5_full left join compustat_cslink on
+cap_rate_clear_last_yr_5_full.gvkey = compustat_cslink.cgvkey and
+cap_rate_clear_last_yr_5_full.ryear = compustat_cslink.dates
+group by gvkey, rate_date) ic left join compustat_cslink on
+ic.gvkey = compustat_cslink.sgvkey and
+ic.ryear = compustat_cslink.dates
+group by gvkey, rate_date;
+
+create table cap_rate_clear_last_yr_5_full_p1 as 
+select
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+supplier,
+customer_p1, 
+if(sgvkey is null,0,1) as supplier_p1
+from
+(select 
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+supplier,
+if(cgvkey is null,0,1) as customer_p1
+from
+cap_rate_clear_last_yr_5_full_i left join compustat_cslink on
+cap_rate_clear_last_yr_5_full_i.gvkey = compustat_cslink.cgvkey and
+cap_rate_clear_last_yr_5_full_i.ryear_p1 = compustat_cslink.dates
+group by gvkey, rate_date) ic left join compustat_cslink on
+ic.gvkey = compustat_cslink.sgvkey and
+ic.ryear_p1 = compustat_cslink.dates
+group by gvkey, rate_date;
+
+create table cap_rate_clear_last_yr_5_full_p2 as 
+select
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+supplier,
+customer_p1, 
+supplier_p1,
+customer_p2, 
+if(sgvkey is null,0,1) as supplier_p2
+from
+(select 
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+supplier,
+customer_p1, 
+supplier_p1,
+if(cgvkey is null,0,1) as customer_p2
+from
+cap_rate_clear_last_yr_5_full_p1 left join compustat_cslink on
+cap_rate_clear_last_yr_5_full_p1.gvkey = compustat_cslink.cgvkey and
+cap_rate_clear_last_yr_5_full_p1.ryear_p2 = compustat_cslink.dates
+group by gvkey, rate_date) ic left join compustat_cslink on
+ic.gvkey = compustat_cslink.sgvkey and
+ic.ryear_p2 = compustat_cslink.dates
+group by gvkey, rate_date;
+
+create table cap_rate_clear_last_yr_5_full_m2 as 
+select
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+supplier,
+customer_p1, 
+supplier_p1,
+customer_p2, 
+supplier_p2,
+customer_m2, 
+if(sgvkey is null,0,1) as supplier_m2
+from
+(select 
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+supplier,
+customer_p1, 
+supplier_p1,
+customer_p2, 
+supplier_p2,
+if(cgvkey is null,0,1) as customer_m2
+from
+cap_rate_clear_last_yr_5_full_p2 left join compustat_cslink on
+cap_rate_clear_last_yr_5_full_p2.gvkey = compustat_cslink.cgvkey and
+cap_rate_clear_last_yr_5_full_p2.ryear_m2 = compustat_cslink.dates
+group by gvkey, rate_date) ic left join compustat_cslink on
+ic.gvkey = compustat_cslink.sgvkey and
+ic.ryear_m2 = compustat_cslink.dates
+group by gvkey, rate_date;
+
+create table cap_rate_clear_last_yr_5_full_m1 as 
+select
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+supplier,
+customer_p1, 
+supplier_p1,
+customer_p2, 
+supplier_p2,
+customer_m2, 
+supplier_m2,
+customer_m1, 
+if(sgvkey is null,0,1) as supplier_m1
+from
+(select 
+conm0,
+GVKEY0,
+gvkey,
+tic0,
+tic,
+cusip0,
+cusip,
+cik0,
+rdate,
+orgdtype,
+rtype,
+rating,
+rate_date,
+pre_rating,
+pre_date,
+ryear,
+ryear_p1,
+ryear_m1,
+ryear_p2,
+ryear_m2,
+customer, 
+supplier,
+customer_p1, 
+supplier_p1,
+customer_p2, 
+supplier_p2,
+customer_m2, 
+supplier_m2,
+if(cgvkey is null,0,1) as customer_m1
+from
+cap_rate_clear_last_yr_5_full_m2 left join compustat_cslink on
+cap_rate_clear_last_yr_5_full_m2.gvkey = compustat_cslink.cgvkey and
+cap_rate_clear_last_yr_5_full_m2.ryear_m1 = compustat_cslink.dates
+group by gvkey, rate_date) ic left join compustat_cslink on
+ic.gvkey = compustat_cslink.sgvkey and
+ic.ryear_m1 = compustat_cslink.dates
+group by gvkey, rate_date;
